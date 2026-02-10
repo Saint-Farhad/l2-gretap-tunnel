@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# FRP Installation Script (WebSocket Version)
-# Optimized for Web-like traffic behavior
+# FRP Installation Script (WS Version - Fixed)
+# Balanced for Iran network stability
 
 show_menu() {
     clear
@@ -25,14 +25,11 @@ install_server() {
     mkdir -p /root/frp/server
 
     cat > /root/frp/server/server-3090.toml <<'EOF'
-# Auto-generated frps config (WS Enabled)
-bindAddr = "::"
+bindAddr = "0.0.0.0"
 bindPort = 3090
 
-# WebSocket Settings
 transport.maxPoolCount = 65535
 transport.tcpMux = true
-transport.tcpMuxKeepaliveInterval = 10
 
 auth.method = "token"
 auth.token = "tun100"
@@ -40,14 +37,14 @@ EOF
 
     cat > /etc/systemd/system/frps@.service <<'EOF'
 [Unit]
-Description=FRP Server Service (%i)
+Description=FRP Server (%i)
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/frps -c /root/frp/server/%i.toml
 Restart=on-failure
-RestartSec=10s
+RestartSec=5s
 LimitNOFILE=infinity
 
 [Install]
@@ -56,9 +53,9 @@ EOF
 
     systemctl daemon-reload
     systemctl enable frps@server-3090.service
-    systemctl start frps@server-3090.service
+    systemctl restart frps@server-3090.service
 
-    echo "FRP Server installed (WS Mode) on port 3090!"
+    echo "FRP Server (WS) started on port 3090!"
 }
 
 install_client() {
@@ -69,8 +66,8 @@ install_client() {
 
     mkdir -p /root/frp/client
 
-    read -p "Enter Iran server address: " server_addr
-    read -p "Enter inbound ports (e.g. 8080 or 6000-6005): " ports
+    read -p "Enter Iran server IP: " server_addr
+    read -p "Enter ports (e.g. 8080 or 443,2053): " ports
     ports=${ports:-8080}
 
     escaped_ports=$(printf '%s' "$ports" | sed 's/"/\\"/g')
@@ -84,13 +81,12 @@ loginFailExit = false
 auth.method = "token"
 auth.token = "tun100"
 
-# --- WebSocket Transport Configuration ---
+# WS Transport Fixes
 transport.protocol = "websocket"
 transport.tcpMux = true
-transport.poolCount = 20
 transport.heartbeatInterval = 30
 transport.heartbeatTimeout = 90
-# ----------------------------------------
+transport.poolCount = 5
 
 {{- range \$_, \$v := parseNumberRangePair "$escaped_ports" "$escaped_ports" }}
 [[proxies]]
@@ -99,19 +95,20 @@ type = "tcp"
 localIP = "127.0.0.1"
 localPort = {{ \$v.First }}
 remotePort = {{ \$v.Second }}
-{{- end }}
 EOF
+# اضافه کردن انتهای فایل به دلیل ساختار template
+    echo '{{- end }}' >> /root/frp/client/client-3090.toml
 
     cat > /etc/systemd/system/frpc@.service <<'EOF'
 [Unit]
-Description=FRP Client Service (%i)
+Description=FRP Client (%i)
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/frpc -c /root/frp/client/%i.toml
 Restart=on-failure
-RestartSec=10s
+RestartSec=5s
 LimitNOFILE=infinity
 
 [Install]
@@ -120,19 +117,17 @@ EOF
 
     systemctl daemon-reload
     systemctl enable frpc@client-3090.service
-    systemctl start frpc@client-3090.service
+    systemctl restart frpc@client-3090.service
 
-    echo "FRP Client installed in WS mode!"
-    echo "Connecting to $server_addr:3090 via WebSocket"
+    echo "FRP Client (WS) started!"
+    echo "Check status with: systemctl status frpc@client-3090"
 }
 
 remove_frp() {
-    echo "=== Removing FRP ==="
     systemctl stop frps@server-3090.service frpc@client-3090.service 2>/dev/null
-    systemctl disable frps@server-3090.service frpc@client-3090.service 2>/dev/null
     rm -rf /root/frp /usr/local/bin/frps /usr/local/bin/frpc /etc/systemd/system/frps@.service /etc/systemd/system/frpc@.service
     systemctl daemon-reload
-    echo "FRP removed."
+    echo "Cleaned up."
 }
 
 while true; do
