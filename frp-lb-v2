@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# FRP Load Balancer Script (Multi-Kharej to Single Iran)
+# Supports Load Balancing via 'group' feature
+
+show_menu() {
+    clear
+    echo "=================================="
+    echo "   FRP Load Balancer Setup (v2)   "
+    echo "=================================="
+    echo "1) Install FRP on Iran (Server)"
+    echo "2) Install FRP on Kharej (Client - LB Mode)"
+    echo "3) Remove FRP"
+    echo "4) Exit"
+    echo "=================================="
+    read -p "Choose an option [1-4]: " choice
+}
+
+install_server() {
+    echo "=== Installing FRP Server (frps) on Iran ==="
+    curl -L -o /usr/local/bin/frps http://81.12.32.210/downloads/frps
+    chmod +x /usr/local/bin/frps
+    mkdir -p /root/frp/server
+
+    cat > /root/frp/server/server-3090.toml <<'EOF'
+bindAddr = "::"
+bindPort = 3090
+transport.heartbeatTimeout = 90
+transport.maxPoolCount = 65535
+transport.tcpMux = false
+auth.method = "token"
+auth.token = "tun100"
+EOF
+
+    cat > /etc/systemd/system/frps@.service <<'EOF'
+[Unit]
+Description=FRP Server Service (%i)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frps -c /root/frp/server/%i.toml
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable frps@server-3090.service
+    systemctl start frps@server-3090.service
+    echo "FRP Server installed!"
+}
+
+install_client() {
+    echo "=== Installing FRP Client (Kharej) in Load Balance Mode ==="
+    curl -L -o /usr/local/bin/frpc https://raw.githubusercontent.com/lostsoul6/frp-file/refs/heads/main/frpc
+    chmod +x /usr/local/bin/frpc
+    mkdir -p /root/frp/client
+
+    read -p "Enter Iran server address: " server_addr
+    read -p "Enter inbound ports (e.g. 8080 or 1000-1010): " ports
+    ports=${ports:-8080}
+
+    escaped_ports=$(printf '%s' "$ports" | sed 's/"/\\"/g')
+
+    cat > /root/frp/client/client-3090.toml <<EOF
+serverAddr = "$server_addr"
+serverPort = 3090
+loginFailExit = false
+auth.method = "token"
+auth.token = "tun100"
+
+transport.protocol = "tcp"
+transport.tcpMux = false
+
+# Go Template for Load Balancing
+{{- range \$_, \$v := parseNumberRangePair "$escaped_ports" "$escaped_ports" }}
+[[proxies]]
+name = "lb-tcp-{{ \$v.First }}"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = {{ \$v.First }}
+remotePort = {{ \$v.Second }}
+
+# Load Balancing Settings
+[proxies.loadBalancer]
+group = "web-lb"
+groupKey = "secret-key"
+{{- end }}
+EOF
+
+    cat > /etc/systemd/system/frpc@.service <<'EOF'
+[Unit]
+Description=FRP Client Service (%i)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frpc -c /root/frp/client/%i.toml
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable frpc@client-3090.service
+    systemctl restart frpc@client-3090.service
+
+    echo "FRP Client installed in LB mode!"
+    echo "Note: Install this on all Kharej servers with the SAME ports."
+}
+
+remove_frp() {
+    systemctl stop frps@server-3090.service frpc@client-3090.service 2>/dev/null
+    rm -f /usr/local/bin/frp* /etc/systemd/system/frp*
+    rm -rf /root/frp
+    echo "FRP removed."
+}
+
+while true; do
+    show_menu
+    case $choice in
+        1) install_server ;;
+        2) install_client ;;
+        3) remove_frp ;;
+        4) exit 0 ;;
+    esac
+    read -p "Press Enter..."
+done
