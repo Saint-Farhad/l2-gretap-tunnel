@@ -1,0 +1,180 @@
+#!/bin/bash
+
+# رنگ‌ها
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+show_menu() {
+    clear
+    echo -e "${BLUE}==========================================${NC}"
+    echo -e "${YELLOW}       FRP DYNAMIC LOAD BALANCER          ${NC}"
+    echo -e "${BLUE}==========================================${NC}"
+    echo -e "1) ${GREEN}Iran Server${NC} (frps)"
+    echo -e "2) ${GREEN}Kharej Server${NC} (frpc)"
+    echo -e "3) Exit"
+    echo -e "${BLUE}------------------------------------------${NC}"
+    read -p "Please choose an option [1-3]: " main_choice
+}
+
+# --- بخش مدیریت ایران ---
+iran_menu() {
+    clear
+    echo -e "${BLUE}>>> Iran Server Management (frps)${NC}"
+    echo "1) Install and Configure frps"
+    echo "2) Show Connected Germany Servers (Status)"
+    echo "3) Uninstall frps"
+    echo "4) Back"
+    read -p "Option: " iran_choice
+    case $iran_choice in
+        1) install_frps ;;
+        2) check_status ;;
+        3) uninstall_frp "frps" ;;
+        *) return ;;
+    esac
+}
+
+install_frps() {
+    echo -e "${YELLOW}--- Configuration ---${NC}"
+    read -p "Enter Bind Port for FRP (e.g. 3090): " b_port
+    read -p "Enter Secret Token (e.g. MyPassword123): " b_token
+    
+    b_port=${b_port:-3090}
+    b_token=${b_token:-tun100}
+
+    echo -e "${YELLOW}Installing frps...${NC}"
+    curl -L -o /usr/local/bin/frps http://81.12.32.210/downloads/frps
+    chmod +x /usr/local/bin/frps
+    mkdir -p /root/frp/server
+
+    cat > /root/frp/server/frps.toml <<EOF
+bindPort = $b_port
+auth.method = "token"
+auth.token = "$b_token"
+
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "admin"
+transport.tcpMux = false
+EOF
+
+    cat > /etc/systemd/system/frps.service <<EOF
+[Unit]
+Description=FRP Server
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/frps -c /root/frp/server/frps.toml
+Restart=on-failure
+LimitNOFILE=infinity
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable frps && systemctl restart frps
+    echo -e "${GREEN}frps is ONLINE on port $b_port!${NC}"
+    sleep 2
+}
+
+# --- بخش مدیریت خارج ---
+kharej_menu() {
+    clear
+    echo -e "${BLUE}>>> Kharej Server Management (frpc)${NC}"
+    echo "1) Install and Configure frpc"
+    echo "2) Uninstall frpc"
+    echo "3) Back"
+    read -p "Option: " kharej_choice
+    case $kharej_choice in
+        1) install_frpc ;;
+        2) uninstall_frp "frpc" ;;
+        *) return ;;
+    esac
+}
+
+install_frpc() {
+    echo -e "${YELLOW}--- Connection Settings ---${NC}"
+    read -p "1. Enter Iran Server IP: " iran_ip
+    read -p "2. Enter Iran Bind Port (the one you set in Iran): " iran_port
+    read -p "3. Enter Secret Token: " iran_token
+    read -p "4. Enter Destination IP (Finland): " finland_ip
+    read -p "5. Enter Ports to Forward (e.g. 9010-9060): " user_ports
+    
+    echo -e "${YELLOW}Installing frpc...${NC}"
+    curl -L -o /usr/local/bin/frpc https://raw.githubusercontent.com/lostsoul6/frp-file/refs/heads/main/frpc
+    chmod +x /usr/local/bin/frpc
+    mkdir -p /root/frp/client
+
+    cat > /root/frp/client/frpc.toml <<EOF
+serverAddr = "$iran_ip"
+serverPort = $iran_port
+auth.method = "token"
+auth.token = "$iran_token"
+
+transport.protocol = "tcp"
+transport.poolCount = 20
+transport.tcpMux = false
+
+{{- range \$i, \$v := parseNumberRangePair "$user_ports" "$user_ports" }}
+[[proxies]]
+name = "lb-{{ \$v.First }}"
+type = "tcp"
+localIP = "$finland_ip"
+localPort = {{ \$v.First }}
+remotePort = {{ \$v.First }}
+group = "dynamic-lb-group"
+groupKey = "shared-secret-123"
+{{- end }}
+EOF
+
+    cat > /etc/systemd/system/frpc.service <<EOF
+[Unit]
+Description=FRP Client
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/frpc -c /root/frp/client/frpc.toml
+Restart=on-failure
+LimitNOFILE=infinity
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable frpc && systemctl restart frpc
+    echo -e "${GREEN}frpc connected and Load-Balancing started!${NC}"
+    sleep 2
+}
+
+uninstall_frp() {
+    local type=$1
+    systemctl stop $type 2>/dev/null
+    systemctl disable $type 2>/dev/null
+    rm -f /etc/systemd/system/$type.service /usr/local/bin/$type
+    rm -rf /root/frp
+    systemctl daemon-reload
+    echo -e "${RED}$type has been completely removed.${NC}"
+    sleep 2
+}
+
+check_status() {
+    echo -e "${YELLOW}Checking Load-Balancer Status...${NC}"
+    result=$(curl -s -u admin:admin http://127.0.0.1:7500/api/proxy/tcp)
+    if [ -z "$result" ]; then
+        echo -e "${RED}Error: API is not responding. Check if frps is running.${NC}"
+    else
+        echo -e "Proxy_Name\tPort\tConns\tStatus"
+        echo "$result" | grep -Po '"name":.*?[^\\]",|"listen_port":\d+|"cur_conns":\d+|"status":.*?[^\\]",' | sed 's/"//g' | xargs -n4
+    fi
+    read -p "Press Enter to return..."
+}
+
+while true; do
+    show_menu
+    case $main_choice in
+        1) iran_menu ;;
+        2) kharej_menu ;;
+        3) exit 0 ;;
+    esac
+done
