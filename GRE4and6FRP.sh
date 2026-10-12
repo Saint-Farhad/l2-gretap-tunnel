@@ -60,38 +60,38 @@ cleanup_gretap() {
     ip route flush table $RT_TABLE_NAME 2>/dev/null || true
     ip link del $GRETAP_IF 2>/dev/null || true
     ip link del $BR_IF 2>/dev/null || true
-    rm $GRE_SERVICE$GRE_CONFIG 2>/dev/null
+    rm $GRE_SERVICE $GRE_CONFIG 2>/dev/null
 }
 
 setup_l2_gre() {
     local LOCAL_IP=$1; local REMOTE_IP=$2; local BRIDGE_IP=$3; local IP_VER=$4
     
     if [[ "$IP_VER" == "6" ]]; then
-        ip link add $GRETAP_IF type ip6gretap local $LOCAL_IP remote$REMOTE_IP
+        ip link add $GRETAP_IF type ip6gretap local $LOCAL_IP remote $REMOTE_IP
     else
         local PUB_IF=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
-        ip link add $GRETAP_IF type gretap local$LOCAL_IP remote $REMOTE_IP dev$PUB_IF
+        ip link add $GRETAP_IF type gretap local $LOCAL_IP remote $REMOTE_IP dev $PUB_IF
     fi
     
     ip link add $BR_IF type bridge
-    ip link set $GRETAP_IF master$BR_IF
-    ip addr add $BRIDGE_IP/30 dev$BR_IF
-    ip link set $GRETAP_IF mtu$MTU_VAL up
-    ip link set $BR_IF mtu$MTU_VAL up
+    ip link set $GRETAP_IF master $BR_IF
+    ip addr add $BRIDGE_IP/30 dev $BR_IF
+    ip link set $GRETAP_IF mtu $MTU_VAL up
+    ip link set $BR_IF mtu $MTU_VAL up
 }
 
 setup_iran_gre() {
     local PORTS=$1; local ACTIVE_MSS=$2
-    if ! grep -q "$RT_TABLE_ID$RT_TABLE_NAME" /etc/iproute2/rt_tables; then
-        echo "$RT_TABLE_ID$RT_TABLE_NAME" >> /etc/iproute2/rt_tables
+    if ! grep -q "$RT_TABLE_ID $RT_TABLE_NAME" /etc/iproute2/rt_tables; then
+        echo "$RT_TABLE_ID $RT_TABLE_NAME" >> /etc/iproute2/rt_tables
     fi
-    ip route add default via $FOREIGN_TUN_IP dev $BR_IF table$RT_TABLE_NAME 2>/dev/null || true
-    ip rule add from $IRAN_TUN_IP table$RT_TABLE_NAME priority 100 2>/dev/null || true
+    ip route add default via $FOREIGN_TUN_IP dev $BR_IF table $RT_TABLE_NAME 2>/dev/null || true
+    ip rule add from $IRAN_TUN_IP table $RT_TABLE_NAME priority 100 2>/dev/null || true
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $ACTIVE_MSS
     for p in $(echo "$PORTS" | tr ',' ' '); do
-        p=$(echo $p \vert{} xargs); [[ -z "$p" ]] && continue
-        iptables -t nat -A PREROUTING -p tcp --dport $p -j DNAT --to-destination$FOREIGN_TUN_IP
-        iptables -t nat -A PREROUTING -p udp --dport $p -j DNAT --to-destination$FOREIGN_TUN_IP
+        p=$(echo $p | xargs); [[ -z "$p" ]] && continue
+        iptables -t nat -A PREROUTING -p tcp --dport $p -j DNAT --to-destination $FOREIGN_TUN_IP
+        iptables -t nat -A PREROUTING -p udp --dport $p -j DNAT --to-destination $FOREIGN_TUN_IP
     done
     iptables -t nat -A POSTROUTING -o $BR_IF -j MASQUERADE
 }
@@ -136,11 +136,11 @@ run_gretap_menu() {
                 [[ "$IP_VER" == "6" ]] && CURRENT_MSS=$MSS_VAL_V6
                 
                 if [[ $gchoice == 1 ]]; then
-                    setup_l2_gre $LOCAL$REMOTE $IRAN_TUN_IP$IP_VER
+                    setup_l2_gre $LOCAL $REMOTE $IRAN_TUN_IP $IP_VER
                     setup_iran_gre "$PORTS" "$CURRENT_MSS"
                     MODE="IRAN"
                 else
-                    setup_l2_gre $LOCAL$REMOTE $FOREIGN_TUN_IP$IP_VER
+                    setup_l2_gre $LOCAL $REMOTE $FOREIGN_TUN_IP $IP_VER
                     setup_foreign_gre "$CURRENT_MSS"
                     MODE="FOREIGN"
                 fi
@@ -176,4 +176,135 @@ cleanup_frp() {
     echo "🧹 Removing FRP..."
     systemctl stop frps@server-3090.service frpc@client-3090.service 2>/dev/null || true
     systemctl disable frps@server-3090.service frpc@client-3090.service 2>/dev/null || true
-    rm -f /
+    rm -f /etc/systemd/system/frps@.service /etc/systemd/system/frpc@.service
+    rm -rf /root/frp; rm -f /usr/local/bin/frps /usr/local/bin/frpc
+    (crontab -l 2>/dev/null | grep -v 'pkill -10') | crontab -
+    echo "✅ FRP Cleaned."
+}
+
+install_frp_server() {
+    echo "=== Installing FRP Server (Iran) ==="
+    curl -L -o /usr/local/bin/frps http://81.12.32.210/downloads/frps
+    chmod +x /usr/local/bin/frps
+    mkdir -p /root/frp/server
+    cat > /root/frp/server/server-3090.toml <<'EOF'
+bindAddr = "::"
+bindPort = 3090
+transport.heartbeatTimeout = 90
+transport.maxPoolCount = 65535
+transport.tcpMux = false
+auth.method = "token"
+auth.token = "tun100"
+EOF
+    cat <<EOF > /etc/systemd/system/frps@.service
+[Unit]
+Description=FRP Server Service (%i)
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/frps -c /root/frp/server/%i.toml
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload; systemctl enable frps@server-3090.service --now
+    (crontab -l 2>/dev/null | grep -v 'pkill -10' ; echo '0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps') | crontab -
+}
+
+install_frp_client() {
+    echo "=== Installing FRP Client (Kharej) ==="
+    curl -L -o /usr/local/bin/frpc https://raw.githubusercontent.com/lostsoul6/frp-file/refs/heads/main/frpc
+    chmod +x /usr/local/bin/frpc
+    mkdir -p /root/frp/client
+    read -p "Enter Iran server address: " server_addr
+    read -p "Enter ports (e.g. 8080,9000-9010): " ports
+    ports=${ports:-8080}
+    cat > /root/frp/client/client-3090.toml <<EOF
+serverAddr = "$server_addr"
+serverPort = 3090
+loginFailExit = false
+auth.method = "token"
+auth.token = "tun100"
+transport.protocol = "tcp"
+transport.tcpMux = false
+transport.poolCount = 20
+{{- range \$_, \$v := parseNumberRangePair "$ports" "$ports" }}
+[[proxies]]
+name = "tcp-{{ \$v.First }}"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = {{ \$v.First }}
+remotePort = {{ \$v.Second }}
+{{- end }}
+EOF
+    cat <<EOF > /etc/systemd/system/frpc@.service
+[Unit]
+Description=FRP Client Service (%i)
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/frpc -c /root/frp/client/%i.toml
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload; systemctl enable frpc@client-3090.service --now
+    (crontab -l 2>/dev/null | grep -v 'pkill -10' ; echo '0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps') | crontab -
+}
+
+run_frp_menu() {
+    while true; do
+        clear
+        echo "🟠 FRP REVERSE TUNNEL SECTION"
+        echo "--------------------------"
+        echo "1) Install FRP Server (Iran)"
+        echo "2) Install FRP Client (Foreign)"
+        echo "3) Remove FRP ONLY"
+        echo "4) Back to Main Menu"
+        read -p "Selection: " fchoice
+        case $fchoice in
+            1) smart_optimize; install_frp_server; read -p "FRP Server Started. Press Enter..." ;;
+            2) smart_optimize; install_frp_client; read -p "FRP Client Connected. Press Enter..." ;;
+            3) cleanup_frp; read -p "FRP Removed. Press Enter..." ;;
+            4) break ;;
+        esac
+    done
+}
+
+# --- Service Autostart for GRETAP ---
+if [[ "$1" == "--start-gre" ]]; then
+    source $GRE_CONFIG; smart_optimize
+    if [[ "$MODE" == "IRAN" ]]; then
+        setup_l2_gre $LOCAL $REMOTE $IRAN_TUN_IP $IP_VER
+        setup_iran_gre "$PORTS" "$CURRENT_MSS"
+    else
+        setup_l2_gre $LOCAL $REMOTE $FOREIGN_TUN_IP $IP_VER
+        setup_foreign_gre "$CURRENT_MSS"
+    fi
+    exit 0
+fi
+
+# ==========================================
+# MAIN ROUTER
+# ==========================================
+
+require_root
+while true; do
+    clear
+    echo "=================================="
+    echo "    ULTIMATE TUNNEL MANAGER"
+    echo "=================================="
+    echo "1) GRETAP L2 (Bridge Mode)"
+    echo "2) FRP (Reverse TCP Mode)"
+    echo "3) Exit"
+    echo "=================================="
+    read -p "Select Tunnel Type: " main_choice
+    case $main_choice in
+        1) run_gretap_menu ;;
+        2) run_frp_menu ;;
+        3) exit 0 ;;
+        *) echo "Invalid choice." ; sleep 1 ;;
+    esac
+done
